@@ -1,0 +1,148 @@
+// schema.prisma — versão inicial mínima
+// Cobre: cadastro de membros, cargos/ministérios como referência editável,
+// lançamentos financeiros (dízimo/oferta) por membro, despesas, e usuários
+// do sistema com permissão separada do cargo eclesiástico.
+//
+// Decisões importantes:
+// - CPF é dado sensível: guardamos, mas o acesso a ele (e aos dados
+//   financeiros) deve ser restrito por permissão na API, não só "quem loga
+//   vê tudo". Ver enum SystemRole mais abaixo.
+// - Valores monetários usam Decimal, nunca Float — Float perde precisão em
+//   centavos ao longo de muitos lançamentos, Decimal não.
+// - "Cargo" (função na igreja) e "Ministério" são tabelas próprias, não
+//   enum fixo no código — você disse que ainda não tem a lista completa,
+//   então isso deixa vocês cadastrarem/renomearem cargos e ministérios sem
+//   precisar mexer no backend.
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+// ---------------------------------------------------------------------------
+// Referência: cargos eclesiásticos (Pastor, Presbítero, Diácono, Membro
+// comum, etc.) — cadastrável, não fixo no código.
+// ---------------------------------------------------------------------------
+model ChurchRole {
+  id      String   @id @default(uuid())
+  name    String   @unique // ex: "Pastor", "Presbítero", "Diácono", "Membro"
+  members Member[]
+}
+
+// ---------------------------------------------------------------------------
+// Referência: ministérios (Jovem, Música, Infantil, etc.) — mesma lógica.
+// ---------------------------------------------------------------------------
+model Ministry {
+  id      String   @id @default(uuid())
+  name    String   @unique
+  members Member[]
+}
+
+// ---------------------------------------------------------------------------
+// Membro da igreja — o cadastro em si.
+// ---------------------------------------------------------------------------
+model Member {
+  id          String       @id @default(uuid())
+  name        String
+  cpf         String?      @unique // opcional porque nem todo cadastro antigo vai ter
+  email       String?
+  phone       String?
+  address     String?
+  birthDate   DateTime?
+  baptismDate DateTime?
+  joinDate    DateTime?
+  status      MemberStatus @default(ACTIVE)
+  notes       String?
+
+  churchRoleId String?
+  churchRole   ChurchRole? @relation(fields: [churchRoleId], references: [id])
+
+  ministryId String?
+  ministry   Ministry? @relation(fields: [ministryId], references: [id])
+
+  contributions Contribution[]
+  userAccount   User? // se esse membro também tiver login no sistema
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+}
+
+enum MemberStatus {
+  ACTIVE
+  INACTIVE
+}
+
+// ---------------------------------------------------------------------------
+// Lançamento financeiro por membro: dízimo ou oferta.
+// Isso é só REGISTRO — a aplicação nunca processa pagamento de verdade.
+// ---------------------------------------------------------------------------
+model Contribution {
+  id       String           @id @default(uuid())
+  memberId String
+  member   Member           @relation(fields: [memberId], references: [id])
+  type     ContributionType
+  amount   Decimal          @db.Decimal(10, 2)
+  date     DateTime
+  notes    String?
+
+  registeredById String? // qual usuário (tesoureiro) fez o lançamento
+  registeredBy   User?   @relation(fields: [registeredById], references: [id])
+
+  createdAt DateTime @default(now())
+}
+
+enum ContributionType {
+  DIZIMO
+  OFERTA
+}
+
+// ---------------------------------------------------------------------------
+// Despesas da igreja (conta de luz, internet, etc.) — não ligadas a um
+// membro específico, mas sim à igreja como um todo. Base pra gerar o
+// relatório que vocês mandam pra sede.
+// ---------------------------------------------------------------------------
+model Expense {
+  id          String   @id @default(uuid())
+  category    String // ex: "Energia", "Internet", "Manutenção" — pode virar tabela de referência depois, se a lista crescer muito
+  description String?
+  amount      Decimal  @db.Decimal(10, 2)
+  date        DateTime
+
+  registeredById String?
+  registeredBy   User?   @relation(fields: [registeredById], references: [id])
+
+  createdAt DateTime @default(now())
+}
+
+// ---------------------------------------------------------------------------
+// Usuário do SISTEMA (login) — separado do cargo eclesiástico do Member.
+// SystemRole é quem decide o que a pessoa pode ver/editar no painel.
+// ---------------------------------------------------------------------------
+model User {
+  id           String     @id @default(uuid())
+  email        String     @unique
+  passwordHash String
+  systemRole   SystemRole
+
+  // opcional: vincular esse login a um cadastro de Member (ex: o tesoureiro
+  // também é membro da igreja) — não obrigatório, pode existir usuário de
+  // sistema sem ser membro cadastrado.
+  memberId String? @unique
+  member   Member? @relation(fields: [memberId], references: [id])
+
+  contributionsRegistered Contribution[]
+  expensesRegistered      Expense[]
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+}
+
+enum SystemRole {
+  ADMIN // vê e edita tudo
+  SECRETARIO // cadastro de membros: vê e edita; financeiro: sem acesso
+  TESOUREIRO // membros: vê, não edita; financeiro (dízimo/oferta/despesas): vê e edita
+}
